@@ -1,0 +1,30 @@
+[package]
+name = "esp-monitor"
+version = "0.1.0"
+edition = "2024"
+description = "Serial monitor and MCP server for resetting and reading logs from ESP8266/ESP32 dev boards"
+license = "MIT"
+
+[lib]
+name = "esp_monitor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "esp-monitor"
+path = "src/main.rs"
+
+[dependencies]
+serialport = { version = "4.9", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+rmcp = { version = "~2.2", features = ["server", "macros", "transport-io", "schemars"] }
+schemars = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctrlc = "3.5"
+regex = "1"
+
+[dev-dependencies]
