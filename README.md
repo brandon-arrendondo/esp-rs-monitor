@@ -1,5 +1,9 @@
 # esp-monitor
 
+[![Build and Release](https://github.com/brandon-arrendondo/esp-rs-monitor/actions/workflows/build.yml/badge.svg)](https://github.com/brandon-arrendondo/esp-rs-monitor/actions/workflows/build.yml)
+[![crates.io](https://img.shields.io/crates/v/esp-monitor.svg)](https://crates.io/crates/esp-monitor)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Rust CLI + MCP server for ESP8266/ESP32 dev boards connected over USB
 serial. It can reset/power-cycle a board by toggling the RTS/DTR lines
 (the same well-known technique tools like `esptool.py` use), stream its
@@ -7,7 +11,19 @@ serial console, and — via the `mcp` subcommand — let an LLM agent do the
 same thing programmatically: reset the board, read buffered log history,
 and manage file logging, all over MCP's stdio transport.
 
-## Build
+## Install
+
+From crates.io:
+
+```
+cargo install esp-monitor
+```
+
+Or grab a prebuilt binary (Linux tarball/deb/rpm/AppImage, Windows zip)
+from the [latest release](https://github.com/brandon-arrendondo/esp-rs-monitor/releases/latest).
+Packaged Linux artifacts also include the `esp-monitor(1)` man page.
+
+## Build from source
 
 ```
 cargo build --release
@@ -97,3 +113,21 @@ substring or regular expression.
 cargo test              # unit tests, no hardware required
 cargo clippy --all-targets
 ```
+
+This repo uses [`pre-commit`](https://pre-commit.com) (fmt, clippy, a 70%
+coverage gate via `cargo-llvm-cov`, and a [`knots`](https://github.com/brandon-arrendondo/knots)
+complexity check) and an [`invoke`](https://www.pyinvoke.org) `tasks.py`
+for common dev commands:
+
+```
+pip install pre-commit invoke
+pre-commit install
+
+invoke check          # run all pre-commit hooks
+invoke build --release
+invoke test
+invoke bump-version --new-version X.Y.Z
+```
+
+CI runs the same checks on every push/PR, then builds and packages
+release artifacts (tarball/zip/deb/rpm/AppImage + SBOM) on `v*.*.*` tags.
