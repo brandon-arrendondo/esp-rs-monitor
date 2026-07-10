@@ -193,7 +193,10 @@ mod tests {
                     Ok(n)
                 }
                 Some(Err(e)) => Err(e),
-                None => Err(io::Error::new(io::ErrorKind::TimedOut, "no more scripted replies")),
+                None => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no more scripted replies",
+                )),
             }
         }
     }
@@ -227,7 +230,12 @@ mod tests {
         assert_eq!(outcome.bytes_seen, 5);
         assert_eq!(
             port.toggles,
-            vec![("rts", true), ("dtr", false), ("rts", false), ("dtr", false)]
+            vec![
+                ("rts", true),
+                ("dtr", false),
+                ("rts", false),
+                ("dtr", false)
+            ]
         );
     }
 

@@ -162,7 +162,10 @@ fn filter_entries(
     if regex {
         let re = regex::Regex::new(pattern)
             .map_err(|e| McpError::invalid_params(format!("invalid regex: {e}"), None))?;
-        Ok(entries.into_iter().filter(|e| re.is_match(&e.text)).collect())
+        Ok(entries
+            .into_iter()
+            .filter(|e| re.is_match(&e.text))
+            .collect())
     } else {
         Ok(entries
             .into_iter()
@@ -238,7 +241,11 @@ impl EspMonitorServer {
         let total_buffered = log.len();
         drop(log);
 
-        let filtered = filter_entries(entries, params.search.as_deref(), params.regex.unwrap_or(false))?;
+        let filtered = filter_entries(
+            entries,
+            params.search.as_deref(),
+            params.regex.unwrap_or(false),
+        )?;
 
         Ok(Json(ReadLogsResult {
             entries: filtered

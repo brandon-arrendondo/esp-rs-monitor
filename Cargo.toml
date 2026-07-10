@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Serial monitor and MCP server for resetting and reading logs from ESP8266/ESP32 dev boards"
 license = "MIT"
+authors = ["Brandon Arrendondo <brandon.arrendondo@bissell.com>"]
+repository = "https://github.com/brandon-arrendondo/esp-rs-monitor"
+homepage = "https://github.com/brandon-arrendondo/esp-rs-monitor"
+readme = "README.md"
+keywords = ["esp32", "esp8266", "serial", "mcp", "cli"]
+categories = ["command-line-utilities", "embedded"]
 
 [lib]
 name = "esp_monitor"

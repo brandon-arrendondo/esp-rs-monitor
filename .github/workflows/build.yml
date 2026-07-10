@@ -1,0 +1,449 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check:
+    name: Check (fmt, clippy, coverage gate)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install pre-commit and invoke
+        run: pip install pre-commit invoke
+
+      - name: Run pre-commit hooks (fmt + clippy + coverage gate)
+        run: invoke check
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov
+          path: lcov.info
+
+  build:
+    name: Build
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact_name: esp-monitor-linux-x64
+            esp_monitor_binary: target/release/esp-monitor
+          - os: windows-2022
+            artifact_name: esp-monitor-windows-x64
+            esp_monitor_binary: target/release/esp-monitor.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+        shell: bash
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Rust installation
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Security Audit - Check Dependencies
+        run: |
+          cargo install cargo-audit
+          cargo audit
+        continue-on-error: true
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Run Tests
+        run: cargo test --release
+
+      - name: Verify Binary
+        run: ${{ matrix.esp_monitor_binary }} --version
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --features cli
+
+      - name: Generate Third-Party Licenses
+        shell: bash
+        run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.txt
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx
+
+      - name: Generate SBOM (CycloneDX)
+        shell: bash
+        run: cargo cyclonedx --format json --spec-version 1.5
+
+      - name: List Build Output (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh ${{ matrix.esp_monitor_binary }}
+
+      - name: List Build Output (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Write-Host "=== Build Artifacts ==="
+          if (Test-Path "${{ matrix.esp_monitor_binary }}") {
+            Get-Item "${{ matrix.esp_monitor_binary }}" | Format-List Name, Length, LastWriteTime
+          } else {
+            Write-Host "Binary not found"
+          }
+        shell: pwsh
+
+      - name: Stage Artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          ARTIFACT_DIR="artifacts/${{ matrix.artifact_name }}-${VERSION}"
+          mkdir -p "${ARTIFACT_DIR}"
+          cp ${{ matrix.esp_monitor_binary }} "${ARTIFACT_DIR}/"
+          cp README.md "${ARTIFACT_DIR}/" 2>/dev/null || true
+          cp LICENSE "${ARTIFACT_DIR}/" 2>/dev/null || true
+          cp THIRD_PARTY_LICENSES.txt "${ARTIFACT_DIR}/"
+          cp esp-monitor.cdx.json "${ARTIFACT_DIR}/"
+          mkdir -p "${ARTIFACT_DIR}/man"
+          cp doc/esp-monitor.1 "${ARTIFACT_DIR}/man/"
+          echo "=== Artifacts staged ==="
+          ls -lhR "${ARTIFACT_DIR}/"
+          echo "ARTIFACT_DIR=${ARTIFACT_DIR}" >> $GITHUB_ENV
+
+      - name: Stage Artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $VERSION = "${{ steps.version.outputs.VERSION }}"
+          $ARTIFACT_DIR = "artifacts/${{ matrix.artifact_name }}-${VERSION}"
+          New-Item -ItemType Directory -Force -Path $ARTIFACT_DIR
+          Copy-Item "${{ matrix.esp_monitor_binary }}" -Destination $ARTIFACT_DIR
+          Copy-Item "README.md" -Destination $ARTIFACT_DIR -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE" -Destination $ARTIFACT_DIR -ErrorAction SilentlyContinue
+          Copy-Item "THIRD_PARTY_LICENSES.txt" -Destination $ARTIFACT_DIR
+          Copy-Item "esp-monitor.cdx.json" -Destination $ARTIFACT_DIR
+          Write-Host "=== Artifacts staged ==="
+          Get-ChildItem $ARTIFACT_DIR
+          echo "ARTIFACT_DIR=${ARTIFACT_DIR}" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}-${{ steps.version.outputs.VERSION }}
+          path: ${{ env.ARTIFACT_DIR }}
+          retention-days: 30
+
+  package:
+    name: Package Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: >-
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm libfuse2
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: esp-monitor-linux-x64-${{ steps.version.outputs.VERSION }}
+          path: artifacts/esp-monitor-linux-x64-${{ steps.version.outputs.VERSION }}
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: esp-monitor-windows-x64-${{ steps.version.outputs.VERSION }}
+          path: artifacts/esp-monitor-windows-x64-${{ steps.version.outputs.VERSION }}
+
+      - name: Restore binary execute bits
+        run: |
+          chmod +x artifacts/esp-monitor-linux-x64-${{ steps.version.outputs.VERSION }}/esp-monitor
+
+      - name: Verify Release Package
+        run: |
+          echo "=== Downloaded Artifacts ==="
+          ls -lR artifacts/
+          echo ""
+          echo "Release package ready with version: ${{ steps.version.outputs.VERSION }}"
+
+      - name: Create Release Archive (Linux)
+        run: |
+          cd artifacts
+          tar -czf esp-monitor-linux-x64-${{ steps.version.outputs.VERSION }}.tar.gz esp-monitor-linux-x64-${{ steps.version.outputs.VERSION }}
+          cd ..
+
+      - name: Create Release Archive (Windows)
+        run: |
+          cd artifacts
+          zip -r esp-monitor-windows-x64-${{ steps.version.outputs.VERSION }}.zip esp-monitor-windows-x64-${{ steps.version.outputs.VERSION }}
+          cd ..
+
+      - name: Build deb package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          PKG_DIR="esp-monitor_${VERSION}_amd64"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/share/doc/esp-monitor"
+          mkdir -p "${PKG_DIR}/usr/share/man/man1"
+
+          # Control file
+          cat > "${PKG_DIR}/DEBIAN/control" << EOF
+          Package: esp-monitor
+          Version: ${VERSION}
+          Section: devel
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Brandon Arrendondo <brandon.arrendondo@bissell.com>
+          Homepage: https://github.com/brandon-arrendondo/esp-rs-monitor
+          Description: Serial monitor and MCP server for ESP8266/ESP32 dev boards
+           A CLI and MCP server for ESP8266/ESP32 dev boards connected over USB
+           serial. Resets/power-cycles a board via RTS/DTR, streams its serial
+           console, and lets an LLM agent do the same over MCP's stdio transport.
+          EOF
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+
+          # Binary
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor" "${PKG_DIR}/usr/bin/"
+          chmod 755 "${PKG_DIR}/usr/bin/esp-monitor"
+
+          # Man page
+          gzip -c doc/esp-monitor.1 > "${PKG_DIR}/usr/share/man/man1/esp-monitor.1.gz"
+
+          # Docs
+          cp README.md "${PKG_DIR}/usr/share/doc/esp-monitor/"
+          cp LICENSE "${PKG_DIR}/usr/share/doc/esp-monitor/copyright"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" \
+             "${PKG_DIR}/usr/share/doc/esp-monitor/"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor.cdx.json" \
+             "${PKG_DIR}/usr/share/doc/esp-monitor/"
+
+          dpkg-deb --build --root-owner-group "${PKG_DIR}"
+          mv "${PKG_DIR}.deb" "artifacts/"
+          echo "=== deb package ==="
+          dpkg-deb --info "artifacts/${PKG_DIR}.deb"
+
+      - name: Build rpm package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          TARDIR="esp-monitor-${VERSION}"
+          mkdir -p "${TARDIR}/bin"
+          mkdir -p "${TARDIR}/doc"
+          mkdir -p "${TARDIR}/man"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor" "${TARDIR}/bin/"
+          cp README.md "${TARDIR}/doc/"
+          cp LICENSE "${TARDIR}/doc/"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" "${TARDIR}/doc/"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor.cdx.json" "${TARDIR}/doc/"
+          cp doc/esp-monitor.1 "${TARDIR}/man/"
+          tar -czf "rpmbuild/SOURCES/esp-monitor-${VERSION}.tar.gz" "${TARDIR}"
+          rm -rf "${TARDIR}"
+
+          cat > rpmbuild/SPECS/esp-monitor.spec << 'SPEC_EOF'
+          Name:           esp-monitor
+          Version:        VERSION_PLACEHOLDER
+          Release:        1%{?dist}
+          Summary:        Serial monitor and MCP server for ESP8266/ESP32 dev boards
+          License:        MIT
+          URL:            https://github.com/brandon-arrendondo/esp-rs-monitor
+          Source0:        %{name}-%{version}.tar.gz
+
+          %description
+          A CLI and MCP server for ESP8266/ESP32 dev boards connected over USB
+          serial. Resets/power-cycles a board via RTS/DTR, streams its serial
+          console, and lets an LLM agent do the same over MCP's stdio transport.
+
+          %prep
+          %setup -q
+
+          %install
+          mkdir -p %{buildroot}%{_bindir}
+          mkdir -p %{buildroot}%{_docdir}/%{name}
+          mkdir -p %{buildroot}%{_mandir}/man1
+          install -m 755 bin/esp-monitor %{buildroot}%{_bindir}/esp-monitor
+          install -m 644 doc/README.md %{buildroot}%{_docdir}/%{name}/README.md
+          install -m 644 doc/LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
+          install -m 644 doc/THIRD_PARTY_LICENSES.txt %{buildroot}%{_docdir}/%{name}/THIRD_PARTY_LICENSES.txt
+          install -m 644 doc/esp-monitor.cdx.json %{buildroot}%{_docdir}/%{name}/esp-monitor.cdx.json
+          install -m 644 man/esp-monitor.1 %{buildroot}%{_mandir}/man1/esp-monitor.1
+
+          %files
+          %{_bindir}/esp-monitor
+          %{_mandir}/man1/esp-monitor.1*
+          %doc %{_docdir}/%{name}/README.md
+          %doc %{_docdir}/%{name}/THIRD_PARTY_LICENSES.txt
+          %doc %{_docdir}/%{name}/esp-monitor.cdx.json
+          %license %{_docdir}/%{name}/LICENSE
+          SPEC_EOF
+
+          sed -i 's/^          //' rpmbuild/SPECS/esp-monitor.spec
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" rpmbuild/SPECS/esp-monitor.spec
+
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/esp-monitor.spec
+          cp rpmbuild/RPMS/x86_64/esp-monitor-*.rpm artifacts/
+          echo "=== rpm package ==="
+          rpm -qip artifacts/esp-monitor-*.rpm
+
+      - name: Build AppImage
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          curl -Lo appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+          APPDIR="esp-monitor.AppDir"
+          mkdir -p "${APPDIR}/usr/bin"
+          mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+          mkdir -p "${APPDIR}/usr/share/man/man1"
+
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor" "${APPDIR}/usr/bin/"
+          chmod 755 "${APPDIR}/usr/bin/esp-monitor"
+
+          gzip -c doc/esp-monitor.1 > "${APPDIR}/usr/share/man/man1/esp-monitor.1.gz"
+
+          mkdir -p "${APPDIR}/usr/share/doc/esp-monitor"
+          cp LICENSE "${APPDIR}/usr/share/doc/esp-monitor/"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/THIRD_PARTY_LICENSES.txt" \
+             "${APPDIR}/usr/share/doc/esp-monitor/"
+          cp "artifacts/esp-monitor-linux-x64-${VERSION}/esp-monitor.cdx.json" \
+             "${APPDIR}/usr/share/doc/esp-monitor/"
+
+          cat > "${APPDIR}/esp-monitor.desktop" << EOF
+          [Desktop Entry]
+          Type=Application
+          Name=esp-monitor
+          Exec=esp-monitor
+          Icon=esp-monitor
+          Comment=Serial monitor and MCP server for ESP8266/ESP32 dev boards
+          Categories=Development;
+          Terminal=true
+          NoDisplay=true
+          EOF
+          sed -i 's/^          //' "${APPDIR}/esp-monitor.desktop"
+
+          cat > "${APPDIR}/esp-monitor.svg" << 'SVG_EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+            <rect width="256" height="256" rx="32" fill="#2d3748"/>
+            <text x="128" y="160" font-family="monospace" font-size="120" font-weight="bold" fill="#e2e8f0" text-anchor="middle">E</text>
+          </svg>
+          SVG_EOF
+          sed -i 's/^          //' "${APPDIR}/esp-monitor.svg"
+          cp "${APPDIR}/esp-monitor.svg" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/"
+
+          cat > "${APPDIR}/AppRun" << 'APPRUN_EOF'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin:${PATH}"
+          exec "${HERE}/usr/bin/esp-monitor" "$@"
+          APPRUN_EOF
+          chmod +x "${APPDIR}/AppRun"
+
+          ARCH=x86_64 ./appimagetool "${APPDIR}" "artifacts/esp-monitor-${VERSION}-x86_64.AppImage"
+          echo "=== AppImage ==="
+          ls -lh "artifacts/esp-monitor-${VERSION}-x86_64.AppImage"
+
+      - name: Upload Release Archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-packages-${{ steps.version.outputs.VERSION }}
+          path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.AppImage
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.AppImage

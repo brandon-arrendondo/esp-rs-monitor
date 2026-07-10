@@ -4,8 +4,8 @@
 //! `main.rs` separately since it's the only thing that needs an async runtime.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -169,8 +169,8 @@ pub fn run_console(args: ConsoleArgs, reset_capable: bool) -> anyhow::Result<()>
         ctrlc::set_handler(move || running.store(false, Ordering::SeqCst))?;
     }
 
-    let deadline = (args.log_time >= 0)
-        .then(|| Instant::now() + Duration::from_secs(args.log_time as u64));
+    let deadline =
+        (args.log_time >= 0).then(|| Instant::now() + Duration::from_secs(args.log_time as u64));
 
     let mut last_seq: Option<u64> = None;
     while running.load(Ordering::SeqCst) {
