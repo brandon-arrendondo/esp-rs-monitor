@@ -67,6 +67,12 @@ enum ReaderCommand {
     PowerOff {
         reply: mpsc::Sender<io::Result<()>>,
     },
+    Close {
+        reply: mpsc::Sender<io::Result<()>>,
+    },
+    Open {
+        reply: mpsc::Sender<io::Result<()>>,
+    },
     StartFileLog {
         path: PathBuf,
         append: bool,
@@ -100,6 +106,19 @@ impl ReaderHandle {
 
     pub fn power_off(&self) -> anyhow::Result<()> {
         self.call(|reply| ReaderCommand::PowerOff { reply })
+    }
+
+    /// Releases the serial port so another process can open it, and
+    /// suppresses auto-reconnect until [`Self::open`] is called.
+    pub fn close(&self) -> anyhow::Result<()> {
+        self.call(|reply| ReaderCommand::Close { reply })
+    }
+
+    /// Clears the manual-close latch and attempts to reopen the port
+    /// immediately. If this attempt fails, normal backoff-based
+    /// auto-reconnect resumes in the background.
+    pub fn open(&self) -> anyhow::Result<()> {
+        self.call(|reply| ReaderCommand::Open { reply })
     }
 
     pub fn start_file_log(&self, path: PathBuf, append: bool) -> anyhow::Result<FileLogInfo> {
@@ -233,6 +252,26 @@ fn run_loop(
                     };
                     let _ = reply.send(result);
                 }
+                ReaderCommand::Close { reply } => {
+                    port = None;
+                    let mut st = status.lock().unwrap();
+                    st.connected = false;
+                    st.closed = true;
+                    st.last_error = None;
+                    drop(st);
+                    let _ = reply.send(Ok(()));
+                }
+                ReaderCommand::Open { reply } => {
+                    if port.is_some() {
+                        // already connected (Open with no prior Close) — just
+                        // clear the latch, no need to reopen anything.
+                        status.lock().unwrap().closed = false;
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        last_attempt = Instant::now();
+                        let _ = reply.send(try_open(&mut port, &status, &mut opener));
+                    }
+                }
                 ReaderCommand::StartFileLog {
                     path,
                     append,
@@ -273,21 +312,13 @@ fn run_loop(
         }
 
         if port.is_none() {
+            if status.lock().unwrap().closed {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             if last_attempt.elapsed() >= backoff {
                 last_attempt = Instant::now();
-                match opener() {
-                    Ok(p) => {
-                        port = Some(p);
-                        let mut st = status.lock().unwrap();
-                        st.connected = true;
-                        st.last_error = None;
-                    }
-                    Err(e) => {
-                        let mut st = status.lock().unwrap();
-                        st.connected = false;
-                        st.last_error = Some(e.to_string());
-                    }
-                }
+                let _ = try_open(&mut port, &status, &mut opener);
             } else {
                 thread::sleep(Duration::from_millis(20));
             }
@@ -326,6 +357,32 @@ fn run_loop(
 
 fn not_connected() -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, "serial port not open")
+}
+
+/// Attempts one open, updating `port`/`status` to reflect the outcome.
+/// Shared by the auto-reconnect loop and the `Open` command handler.
+fn try_open(
+    port: &mut Option<Box<dyn ResetPort>>,
+    status: &SharedStatus,
+    opener: &mut impl FnMut() -> io::Result<Box<dyn ResetPort>>,
+) -> io::Result<()> {
+    match opener() {
+        Ok(p) => {
+            *port = Some(p);
+            let mut st = status.lock().unwrap();
+            st.connected = true;
+            st.closed = false;
+            st.last_error = None;
+            Ok(())
+        }
+        Err(e) => {
+            let mut st = status.lock().unwrap();
+            st.connected = false;
+            st.closed = false;
+            st.last_error = Some(e.to_string());
+            Err(e)
+        }
+    }
 }
 
 /// Splits captured serial output into a main log file and a separate
@@ -711,6 +768,79 @@ mod tests {
         assert!(!handle.status.lock().unwrap().connected);
         assert!(handle.reset().is_err());
         assert!(handle.power_off().is_err());
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn close_releases_port_and_suppresses_auto_reconnect() {
+        let opens = Arc::new(Mutex::new(0u32));
+        let opens_for_opener = opens.clone();
+        let opener = move || -> io::Result<Box<dyn ResetPort>> {
+            *opens_for_opener.lock().unwrap() += 1;
+            Ok(Box::new(FiniteScriptPort {
+                lines: VecDeque::new(),
+            }) as Box<dyn ResetPort>)
+        };
+        let handle = spawn_with_opener(fast_config(), opener);
+        wait_until_connected(&handle);
+        assert_eq!(*opens.lock().unwrap(), 1);
+
+        handle.close().unwrap();
+        assert!(!handle.status.lock().unwrap().connected);
+        assert!(handle.status.lock().unwrap().closed);
+
+        // Give the reader loop several backoff windows to (incorrectly)
+        // reconnect if the `closed` latch weren't respected.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            *opens.lock().unwrap(),
+            1,
+            "closed port must not be auto-reopened"
+        );
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn open_after_close_reconnects() {
+        let opens = Arc::new(Mutex::new(0u32));
+        let opens_for_opener = opens.clone();
+        let opener = move || -> io::Result<Box<dyn ResetPort>> {
+            *opens_for_opener.lock().unwrap() += 1;
+            Ok(Box::new(FiniteScriptPort {
+                lines: VecDeque::new(),
+            }) as Box<dyn ResetPort>)
+        };
+        let handle = spawn_with_opener(fast_config(), opener);
+        wait_until_connected(&handle);
+
+        handle.close().unwrap();
+        assert!(!handle.status.lock().unwrap().connected);
+
+        handle.open().unwrap();
+        assert!(handle.status.lock().unwrap().connected);
+        assert!(!handle.status.lock().unwrap().closed);
+        assert_eq!(*opens.lock().unwrap(), 2);
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn open_without_prior_close_is_a_harmless_noop() {
+        // `opener_for` only has one port in its slot — if `open` tried to
+        // reopen an already-connected port, this would fail.
+        let handle = spawn_with_opener(
+            fast_config(),
+            opener_for(FiniteScriptPort {
+                lines: VecDeque::new(),
+            }),
+        );
+        wait_until_connected(&handle);
+
+        assert!(handle.open().is_ok());
+        assert!(handle.status.lock().unwrap().connected);
+        assert!(!handle.status.lock().unwrap().closed);
 
         handle.shutdown();
     }

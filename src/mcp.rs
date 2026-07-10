@@ -84,6 +84,17 @@ struct PowerResult {
     confirmed: bool,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+struct CloseResult {
+    closed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct OpenResult {
+    connected: bool,
+    error: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadLogsParams {
     /// Number of most recent lines to return (ignored if since_seq is set). Defaults to 200.
@@ -114,6 +125,9 @@ struct ReadLogsResult {
 #[derive(Debug, Serialize, JsonSchema)]
 struct StatusResult {
     connected: bool,
+    /// True while the port has been intentionally released via `close` and
+    /// not yet reopened via `open`.
+    closed: bool,
     port: String,
     baud: u32,
     buffered_lines: usize,
@@ -225,6 +239,41 @@ impl EspMonitorServer {
     }
 
     #[tool(
+        description = "Release the serial port so another process (e.g. `cargo test`'s flash \
+                        step) can open it. Auto-reconnect is suppressed until `open` is called."
+    )]
+    async fn close(&self) -> Result<Json<CloseResult>, McpError> {
+        let handle = self.handle.clone();
+        tokio::task::spawn_blocking(move || handle.close())
+            .await
+            .map_err(blocking_err)?
+            .map_err(anyhow_err)?;
+        Ok(Json(CloseResult { closed: true }))
+    }
+
+    #[tool(
+        description = "Reopen the serial port after `close`, resuming the log stream. If the \
+                        immediate attempt fails (e.g. the port is still held by another \
+                        process), normal auto-reconnect resumes in the background."
+    )]
+    async fn open(&self) -> Result<Json<OpenResult>, McpError> {
+        let handle = self.handle.clone();
+        let result = tokio::task::spawn_blocking(move || handle.open())
+            .await
+            .map_err(blocking_err)?;
+        match result {
+            Ok(()) => Ok(Json(OpenResult {
+                connected: true,
+                error: None,
+            })),
+            Err(e) => Ok(Json(OpenResult {
+                connected: false,
+                error: Some(e.to_string()),
+            })),
+        }
+    }
+
+    #[tool(
         description = "Read buffered serial log lines, optionally filtering by substring or regex."
     )]
     fn read_logs(
@@ -268,6 +317,7 @@ impl EspMonitorServer {
         let buffered_lines = self.handle.log.lock().unwrap().len();
         Json(StatusResult {
             connected: st.connected,
+            closed: st.closed,
             port: st.port.clone(),
             baud: st.baud,
             buffered_lines,
@@ -331,7 +381,9 @@ impl ServerHandler for EspMonitorServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Controls an ESP8266/ESP32 dev board over serial: reset/power-cycle it and read its \
              buffered console output. Call `status` first to check whether the board is \
-             connected before resetting or reading logs.",
+             connected before resetting or reading logs. If another process needs exclusive \
+             access to the serial port (e.g. flashing firmware, running on-device tests), call \
+             `close` first to release it, then `open` afterward to resume monitoring.",
         )
     }
 }

@@ -9,6 +9,11 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct ReaderStatus {
     pub connected: bool,
+    /// Set while the port has been intentionally released via the `close`
+    /// command — suppresses the reader thread's usual auto-reconnect loop
+    /// so another process (e.g. `cargo test`'s flash step) can take the
+    /// device, until `open` is called to hand it back.
+    pub closed: bool,
     pub port: String,
     pub baud: u32,
     pub file_log_path: Option<String>,
@@ -21,6 +26,7 @@ impl ReaderStatus {
     pub fn new(port: String, baud: u32) -> Self {
         Self {
             connected: false,
+            closed: false,
             port,
             baud,
             file_log_path: None,

@@ -83,10 +83,16 @@ connect.
 |---|---|---|
 | `reset` | — | `{ confirmed, attempts, bytes_seen }` |
 | `power` | `{ state: "on" \| "off" }` | `{ state, confirmed }` |
+| `close` | — | `{ closed }` |
+| `open` | — | `{ connected, error? }` |
 | `read_logs` | `{ lines?, since_seq?, search?, regex? }` | `{ entries: [{seq, text, at}], newest_seq, total_buffered, truncated }` |
-| `status` | — | `{ connected, port, baud, buffered_lines, file_logging, file_log_path, last_error, uptime_seconds }` |
+| `status` | — | `{ connected, closed, port, baud, buffered_lines, file_logging, file_log_path, last_error, uptime_seconds }` |
 | `file_log` | `{ action: "start" \| "stop", path?, append? }` | start: `{path, stats_path}`; stop: `{path, lines_written, stats_path}` |
 | `clear_logs` | — | `{ cleared_lines }` |
+
+`close`/`open` release and reacquire the serial port so another process (e.g.
+`cargo test`'s on-device flash step) can use it exclusively — `close`
+suppresses the server's usual auto-reconnect until `open` is called.
 
 `read_logs` returns the most recent `lines` entries (default 200) unless
 `since_seq` is given, in which case it returns everything newer than that
