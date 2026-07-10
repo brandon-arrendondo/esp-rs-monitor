@@ -4,9 +4,10 @@
 > `~/.claude/plans/`) specifically so it travels with `git clone`/`pull` to
 > a different machine. Update the **Status** section as work progresses.
 
-## Status (last updated 2026-07-09, end of day)
+## Status (last updated 2026-07-10)
 
-**Done (steps 1–5 of the implementation order below), all on `main`, pushed to origin:**
+**Done (steps 1–6 of the implementation order below), all on `main`, pushed to origin:**
+- **Step 6, real-hardware verification** — done against a real board (`/dev/ttyACM0`, an ESP32-C61 running `libespidf`/`esp_rs_home_assistant_pet_feeder`). `reset` confirmed on attempt 1 (default 100ms/2000ms/5-retry timing worked with no tuning needed), `console` correctly resets-then-streams the full boot log, `off` asserts power-off (RTS set/DTR clear) and `on` visibly reboots the board and streams its boot log. No timing-constant changes required.
 - `Cargo.toml` scaffold — lib (`esp_monitor`) + bin (`esp-monitor`) targets, all dependencies resolved and building.
 - `src/lineread.rs` — `LineSplitter`. Tested.
 - `src/stats.rs` — `StatsExtractor`. Tested.
@@ -16,22 +17,20 @@
 - `src/cli.rs` + `src/main.rs` — `console`/`on`/`off`/`reset`/`mcp` subcommands wired up, `--help` reviewed. `mcp` subcommand currently just a stub (`src/mcp.rs` returns "not yet implemented").
 - 42 unit tests passing, `cargo clippy --all-targets` clean, stable across repeated runs.
 
-**Not done yet:**
-- **Real-hardware verification of `console`/`on`/`off`/`reset`** (step 6's other half). The work machine had no `/dev/ttyUSB*`/`/dev/ttyACM*` device attached, so this has not been tried against an actual board at all yet. This is the very next thing to do once a board is available — see Verification section below. Expect to tune `--reset-pulse-ms`/`--reset-timeout-ms`/`--reset-retries` defaults (currently 100ms/2000ms/5) against real behavior.
-- **Step 7: `src/mcp.rs`** — the whole point of this project (MCP server + 6 tools) is not built yet. `src/mcp.rs` is a one-line stub. This is the next coding task.
-- **Step 8: `README.md`** — not written.
-- **Step 9: polish pass** (ctrlc-driven flush on shutdown is partially there via `handle.shutdown()` in `cli.rs`'s Ctrl-C handler, but hasn't been verified interactively; final `--help` review pending).
+- **Step 7, `src/mcp.rs`** — implemented: `EspMonitorServer` (`Clone`, holds a `ReaderHandle` + a stored `ToolRouter<Self>` field wired via `#[tool_handler(router = self.tool_router)]` rather than the macro's default `Self::tool_router()`, so the router isn't rebuilt on every call) with all 6 tools (`reset`, `power`, `read_logs`, `status`, `file_log`, `clear_logs`) via `#[tool_router]`/`#[tool]`. `reset`/`power`/`file_log` bridge the blocking `ReaderHandle` calls via `tokio::task::spawn_blocking`; `read_logs`/`status`/`clear_logs` touch the `Arc<Mutex<_>>`s inline. `read_logs` filters `tail`/`since` results with plain `.contains()` or `regex::Regex` per the `regex` param, and reports `at` as f64 Unix-epoch seconds. Verified against the real board (see below) with a hand-crafted JSON-RPC smoke test over stdio (no `npx`/`@modelcontextprotocol/inspector` available on this machine) exercising all 6 tools — all returned correct results, stdout stayed clean JSON-RPC, stderr stayed empty at default verbosity, and the empty stats file was correctly removed on `file_log` stop.
+- `cli.rs`'s `ResetTuning::to_opts` was changed from private to `pub(crate)` so `mcp.rs` (a sibling module) can reuse it when building `ReaderConfig`.
+
+- **Step 8, `README.md`** — written: build prereqs (no libudev-dev, `dialout` group), CLI usage + flag table, MCP tool table, example client config stanza.
+- **Step 9, polish pass** — `--help` output for all subcommands reviewed and reads cleanly (clap-generated, no changes needed). Ctrl-C shutdown-flush verified interactively against the real board: `console --log-path ... --no-console` for 2s then `SIGINT` → log shows `file log closed lines=48`, the 48 boot-log lines are actually on disk, process exits cleanly.
+
+**All 9 implementation-order steps are now done.** `cargo test` (42 passed), `cargo clippy --all-targets` (clean), and hardware verification (reset/console/on/off/mcp, all 6 tools) all pass. Nothing outstanding from the original plan; any further work is new scope, not backlog.
 
 **Deviations from the original design worth knowing about** (the plan below is the original pre-build design; reality diverged in a few small, deliberate ways):
 - `reader.rs`'s `ReaderCommand` reply channels use plain `std::sync::mpsc`, not `tokio::sync::oneshot` as originally sketched. This keeps the entire `esp_monitor` lib crate tokio-free — only `src/mcp.rs` (not yet written) will need to bridge sync `ReaderHandle` calls into async tool handlers, presumably via `tokio::task::spawn_blocking`. Keep this in mind when writing `mcp.rs`.
 - `RingBuffer` (`logbuf.rs`) does **not** have a `search(pattern)` method as originally sketched — substring/regex filtering was deliberately deferred to whichever layer needs it (the `read_logs` MCP tool), since `RingBuffer` only needs `tail`/`since` to serve that. When writing the `read_logs` tool, filter the `Vec<LogEntry>` returned by `tail`/`since` yourself (plain substring `.contains()` or `regex::Regex` depending on the tool's `regex: bool` param).
 - `serial.rs` introduces a `ResetPort` trait not mentioned in the original plan — it's the seam that makes both `serial.rs` and `reader.rs` unit-testable without real hardware. `Box<dyn serialport::SerialPort>` implements it; fakes in tests implement it directly.
 
-**Immediate next steps, in order:**
-1. Get real hardware verification of `console`/`on`/`off`/`reset` done (step 6) — plug in an ESP8266/ESP32, run the verification commands below, tune reset timing constants if needed.
-2. Write `src/mcp.rs` (step 7) — see the tool table below. Remember: `mcp.rs` is the only file allowed to depend on tokio directly; all tracing must go to stderr (stdout is the JSON-RPC channel — `main.rs` already sets this up correctly via `.with_writer(std::io::stderr)`, don't undo that).
-3. `README.md` (step 8).
-4. Polish pass (step 9).
+**Immediate next steps:** none — all steps complete. Possible future work: re-check `rmcp`'s exact macro attribute names if upgrading past `~2.2` (fast-moving SDK), and get inspector-based verification with `npx @modelcontextprotocol/inspector` on a machine that has Node installed (this machine doesn't; verification here used a hand-crafted JSON-RPC smoke test instead, exercising all 6 tools with the same effective coverage).
 
 ---
 
@@ -94,10 +93,10 @@ Ring buffer defaults: 2000 lines / 2 MiB, already configurable via `--ring-buffe
 3. ✅ `serial.rs` — reset/power logic against a fake port, unit tests.
 4. ✅ `logbuf.rs` — `RingBuffer` unit tests.
 5. ✅ `reader.rs` — thread + command dispatch + line/stats integration, tested against a fake port.
-6. ⏳ `cli.rs` + `main.rs` written and building; **real-hardware verification still outstanding**.
-7. ⬜ `mcp.rs` — tool definitions + stdio wiring; sanity-check with `npx @modelcontextprotocol/inspector cargo run -- mcp` before wiring into a real Claude client config.
-8. ⬜ `README.md` — build prereqs (no libudev-dev needed; Linux `dialout` group), CLI usage, MCP tool table, example MCP client config stanza for `esp-monitor mcp`.
-9. ⬜ Polish: verify `ctrlc` graceful shutdown actually flushes an active file log; final `--help` text review.
+6. ✅ `cli.rs` + `main.rs` written and building; real-hardware verification done (see Status).
+7. ✅ `mcp.rs` — tool definitions + stdio wiring; sanity-checked with a hand-crafted JSON-RPC smoke test over stdio against the real board (`npx`/`@modelcontextprotocol/inspector` unavailable on this machine — no Node/npm installed).
+8. ✅ `README.md` — build prereqs (no libudev-dev needed; Linux `dialout` group), CLI usage, MCP tool table, example MCP client config stanza for `esp-monitor mcp`.
+9. ✅ Polish: verified `ctrlc` graceful shutdown actually flushes an active file log; `--help` text reviewed, no changes needed.
 
 ## Open items to confirm during build (flagged, not guessed silently)
 

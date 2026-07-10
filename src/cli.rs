@@ -69,7 +69,7 @@ pub struct ResetTuning {
 }
 
 impl ResetTuning {
-    fn to_opts(&self) -> ResetOptions {
+    pub(crate) fn to_opts(&self) -> ResetOptions {
         ResetOptions {
             pulse: Duration::from_millis(self.reset_pulse_ms),
             confirm_timeout: Duration::from_millis(self.reset_timeout_ms),
