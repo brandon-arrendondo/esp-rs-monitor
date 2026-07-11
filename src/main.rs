@@ -14,6 +14,10 @@ fn main() -> anyhow::Result<()> {
         Command::On(args) => cli::run_console(args, true),
         Command::Reset(args) => cli::run_console(args, true),
         Command::Off(args) => cli::run_off(args),
+        Command::Watch(args) => {
+            let code = cli::run_watch(args)?;
+            std::process::exit(code);
+        }
         Command::Mcp(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

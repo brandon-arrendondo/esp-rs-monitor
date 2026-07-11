@@ -65,6 +65,26 @@ Useful flags on `console`/`on`/`reset`:
 
 Ctrl-C exits cleanly, flushing any active file log first.
 
+### `watch`: pattern-based exit for CI/on-device test runners
+
+```
+esp-monitor watch --port /dev/ttyUSB0 \
+  --pass-pattern 'test result: ok' \
+  --fail-pattern 'test result: FAILED' \
+  --timeout 30
+```
+
+Resets the board (unless `--no-reboot`), streams its console, and exits as
+soon as a line matches `--pass-pattern` (exit `0`) or `--fail-pattern` (exit
+`1`); if `--timeout` seconds pass with no match it exits `2`. Both patterns
+are regexes. This is meant for a `cargo:runner` or CI step that needs a plain
+process exit code rather than a human watching logs, e.g. paired with a
+non-interactive flash step:
+
+```
+runner = "sh -c 'espflash flash --non-interactive $0 && esp-monitor watch --pass-pattern \"test result: ok\" --fail-pattern \"test result: FAILED\" --timeout 30'"
+```
+
 ## MCP server
 
 ```

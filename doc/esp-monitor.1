@@ -1,4 +1,4 @@
-.TH ESP-MONITOR 1 "2026-07-10" "esp-monitor 0.2.0" "User Commands"
+.TH ESP-MONITOR 1 "2026-07-10" "esp-monitor 0.3.0" "User Commands"
 .SH NAME
 esp-monitor \- serial monitor and MCP server for ESP8266/ESP32 dev boards
 .SH SYNOPSIS
@@ -59,11 +59,18 @@ Alias for
 .B off
 Hold the board in reset/power-off (RTS asserted, DTR clear) and exit.
 .TP
+.B watch
+Reset the board (unless
+.BR \-\-no\-reboot ),
+stream its console, and exit with a status code matching a pass/fail
+pattern match \(em for CI or on-device test runners that need a plain
+process exit code instead of a human watching logs.
+.TP
 .B mcp
 Start the MCP server on the stdio transport.
 .SH OPTIONS
 Options common to
-.BR console ", " on ", " reset ", " off ", and " mcp :
+.BR console ", " on ", " reset ", " off ", " watch ", and " mcp :
 .TP
 .BI \-\-port " PORT"
 Serial device path.
@@ -82,7 +89,7 @@ always written to stderr; for the
 subcommand stdout is reserved for the JSON-RPC transport.
 .PP
 Additional options for
-.BR console ", " on ", " reset ", and " mcp
+.BR console ", " on ", " reset ", " watch ", and " mcp
 (reset tuning):
 .TP
 .BI \-\-reset\-pulse\-ms " MS"
@@ -127,6 +134,27 @@ for silent capture.
 Skip the reset before streaming.
 .PP
 Additional options for
+.B watch
+only:
+.TP
+.BI \-\-pass\-pattern " REGEX"
+Exit 0 the moment a streamed line matches this regex.
+.TP
+.BI \-\-fail\-pattern " REGEX"
+Exit 1 the moment a streamed line matches this regex.
+.TP
+.BI \-\-timeout " SECS"
+Exit 2 if neither pattern matches within this many seconds.
+Default:
+.IR 30 .
+.TP
+.B \-\-no\-console
+Do not print board output to stdout while watching.
+.TP
+.B \-\-no\-reboot
+Skip the reset before watching.
+.PP
+Additional options for
 .B mcp
 only:
 .TP
@@ -156,10 +184,23 @@ Hold the board in power-off:
 .TP
 Start the MCP server for an agent to drive:
 .B esp-monitor mcp \-\-port /dev/ttyUSB0
+.TP
+Reset, watch for on-device test results, and exit with a matching status:
+.B esp-monitor watch \-\-port /dev/ttyUSB0 \-\-pass\-pattern 'test result: ok' \-\-fail\-pattern 'test result: FAILED' \-\-timeout 30
 .SH EXIT STATUS
 .B esp-monitor
 exits with status 0 on success, non-zero on error (e.g. the port could not
 be opened, or the board never confirmed a reset).
+.PP
+For
+.B watch
+specifically: 0 if
+.B \-\-pass\-pattern
+matched, 1 if
+.B \-\-fail\-pattern
+matched, 2 if
+.B \-\-timeout
+elapsed with no match.
 .SH SEE ALSO
 .BR esptool.py (1)
 .SH AUTHOR

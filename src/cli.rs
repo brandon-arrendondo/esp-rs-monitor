@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 use esp_monitor::reader::{self, ReaderConfig, ReaderHandle, ResetOptions};
+use regex::Regex;
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +34,9 @@ pub enum Command {
     Off(PortArgs),
     /// Reset the board and stream its serial console (same as `on`)
     Reset(ConsoleArgs),
+    /// Reset the board, watch its console for a pass/fail pattern, and exit
+    /// with a matching status code (for CI/on-device test runners)
+    Watch(WatchArgs),
     /// Start the MCP server (stdio transport)
     Mcp(McpArgs),
 }
@@ -42,6 +46,7 @@ impl Command {
         match self {
             Command::Console(a) | Command::On(a) | Command::Reset(a) => a.port.verbose,
             Command::Off(a) => a.verbose,
+            Command::Watch(a) => a.port.verbose,
             Command::Mcp(a) => a.port.verbose,
         }
     }
@@ -99,6 +104,34 @@ pub struct ConsoleArgs {
     #[arg(long)]
     pub no_reboot: bool,
 }
+
+#[derive(Args, Clone)]
+pub struct WatchArgs {
+    #[command(flatten)]
+    pub port: PortArgs,
+    #[command(flatten)]
+    pub reset: ResetTuning,
+    /// Exit 0 the moment a line matches this regex
+    #[arg(long)]
+    pub pass_pattern: String,
+    /// Exit with the fail status the moment a line matches this regex
+    #[arg(long)]
+    pub fail_pattern: String,
+    /// Seconds to wait for a match before exiting with the timeout status
+    #[arg(long, default_value_t = 30)]
+    pub timeout: u64,
+    /// Do not reset the board before watching
+    #[arg(long)]
+    pub no_reboot: bool,
+    /// Do not print board output to the console while watching
+    #[arg(long)]
+    pub no_console: bool,
+}
+
+/// Exit code used when `--fail-pattern` matches before `--pass-pattern`.
+pub const WATCH_EXIT_FAILED: i32 = 1;
+/// Exit code used when `--timeout` elapses with no pattern match.
+pub const WATCH_EXIT_TIMED_OUT: i32 = 2;
 
 #[derive(Args, Clone)]
 pub struct McpArgs {
@@ -209,6 +242,97 @@ pub fn run_console(args: ConsoleArgs, reset_capable: bool) -> anyhow::Result<()>
     print!("\x1b[0m");
 
     Ok(())
+}
+
+/// Resets the board (unless `--no-reboot`) and streams its console, looking
+/// for `--pass-pattern`/`--fail-pattern` matches. Returns the process exit
+/// code to use: 0 on pass, [`WATCH_EXIT_FAILED`] on fail, or
+/// [`WATCH_EXIT_TIMED_OUT`] if `--timeout` elapses with no match.
+pub fn run_watch(args: WatchArgs) -> anyhow::Result<i32> {
+    let pass_re = Regex::new(&args.pass_pattern)
+        .map_err(|e| anyhow::anyhow!("invalid --pass-pattern: {e}"))?;
+    let fail_re = Regex::new(&args.fail_pattern)
+        .map_err(|e| anyhow::anyhow!("invalid --fail-pattern: {e}"))?;
+
+    let config = ReaderConfig {
+        port: args.port.port.clone(),
+        baud: args.port.baud,
+        reset_opts: args.reset.to_opts(),
+        ..ReaderConfig::default()
+    };
+
+    let handle = reader::spawn(config);
+    wait_for_connection(&handle, Duration::from_secs(5))?;
+
+    if !args.no_reboot {
+        match handle.reset() {
+            Ok(outcome) if outcome.confirmed => {
+                tracing::info!(attempts = outcome.attempts, "board reset confirmed");
+            }
+            Ok(outcome) => {
+                tracing::warn!(
+                    attempts = outcome.attempts,
+                    "reset sent but board did not respond"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "reset failed"),
+        }
+    }
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let running = running.clone();
+        ctrlc::set_handler(move || running.store(false, Ordering::SeqCst))?;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+
+    let mut last_seq: Option<u64> = None;
+    let mut exit_code = WATCH_EXIT_TIMED_OUT;
+    while running.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            break;
+        }
+
+        let entries = {
+            let log = handle.log.lock().unwrap();
+            match last_seq {
+                Some(seq) => log.since(seq),
+                None => log.tail(usize::MAX),
+            }
+        };
+
+        let mut matched = false;
+        for entry in &entries {
+            last_seq = Some(entry.seq);
+            if !args.no_console {
+                println!("{}", entry.text);
+            }
+            if fail_re.is_match(&entry.text) {
+                exit_code = WATCH_EXIT_FAILED;
+                matched = true;
+                break;
+            }
+            if pass_re.is_match(&entry.text) {
+                exit_code = 0;
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    handle.shutdown();
+
+    // restore terminal colors in case the board's output left an ANSI
+    // color code unclosed
+    print!("\x1b[0m");
+
+    Ok(exit_code)
 }
 
 pub fn run_off(args: PortArgs) -> anyhow::Result<()> {
